@@ -1,0 +1,8 @@
+#!/bin/bash
+cd /users/8/pan00389/multi-agent/error-attribution; export ERROR_ATTR_ROOT=$PWD PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+until grep -q "DONE distill" reports/alfworld/env_evidence/teacher7b/run.log; do
+  srun --jobid=2358103 --overlap -n1 -c4 --mem=0 /users/8/pan00389/miniconda3/envs/error_attr/bin/python3 -u scripts/alfworld_attr_opd.py distill --traj reports/alfworld/student3b_low100_train_b50.jsonl --targets reports/alfworld/env_evidence/teacher7b/targets.jsonl --student Qwen/Qwen2.5-3B-Instruct --adapter reports/alfworld/student3b_low100/final --out reports/alfworld/env_evidence/teacher7b/round1 --verify_k 2 --exclude_a_minus --max_examples_per_run 250 >> reports/alfworld/env_evidence/teacher7b/run.log 2>&1 || sleep 120
+done
+echo "=== $(date '+%F %T') teacher7b verify done: $(wc -l < reports/alfworld/env_evidence/teacher7b/round1/examples.jsonl)/100 verified" >> reports/alfworld/env_evidence/teacher7b/run.log
+until grep -q 'DONE onestep' reports/alfworld/env_evidence/teacher7b/onestep.log 2>/dev/null; do srun --jobid=2239109 --overlap -n1 -c2 --mem=24G /users/8/pan00389/miniconda3/envs/error_attr/bin/python3 -u scripts/env_evidence_filter.py --teacher_dir reports/alfworld/env_evidence/teacher7b onestep >> reports/alfworld/env_evidence/teacher7b/onestep.log 2>&1; sleep 5; done
+/users/8/pan00389/miniconda3/envs/error_attr/bin/python3 scripts/env_evidence_filter.py --teacher_dir reports/alfworld/env_evidence/teacher7b analyze > reports/alfworld/env_evidence/teacher7b/analyze.log 2>&1; echo "=== $(date '+%F %T') teacher7b analysis done" >> reports/alfworld/env_evidence/teacher7b/run.log

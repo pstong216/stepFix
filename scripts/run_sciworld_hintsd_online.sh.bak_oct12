@@ -1,0 +1,44 @@
+#!/bin/bash
+# Oct 11 2026 (coordinator, ARR): ONLINE HINT-SD baseline on ScienceWorld, 3B, from R0 (student10/final).  Trainer =
+# scripts/hintsd_online_sciworld.py (port of the ALFWorld online run: same algorithm / hyperparameters, B=2 x 4 rollouts, lr 5e-6, EMA 0.999,
+# no env verification, no replay) on the 1,483 train variations of our rounds; ckpt1..3 EXACTLY at 1,483 / 2,966 / 4,449 episodes.
+# Each checkpoint is evaluated as soon as it exists (848 = test per_task 30 + dev per_task 7, seed 0, greedy, budget 50, --snap safe;
+# 32 test + 8 dev shards as run_sciworld_abl1.sh), tags hsdon_c1..3, then compared with R0 / w1 / w2k / wk3 (-> queue.log).
+# The trainer resumes from $T/state after a kill / hold-job expiry.
+#   launch (cpu_tmux node):  tmux new -d -s sw_hsd_online "bash scripts/run_sciworld_hintsd_online.sh"
+source scripts/lib_sciworld_stepfix.sh; export GMEM=9000; T=$SF/hsdon_train; mkdir -p $T
+# Oct 11 21:45: cap the ScienceWorld JVM heap (default 1/4 of host RAM -> 3-4 GB RSS per JVM caused host-RAM OOM kills in the shared 64G GPU jobs);
+# inherited by the trainer workers and the 40 eval shards (srun exports the env). Heap size does not change environment behaviour.
+export JAVA_TOOL_OPTIONS="-Xmx1g -XX:+UseSerialGC -XX:MaxMetaspaceSize=256m -XX:ReservedCodeCacheSize=64m"
+HSD_MIN=${HSD_MIN:-15000}
+HSD_RAM=${HSD_RAM:-20}   # GiB of free host RAM (job cgroup limit - rss - shmem) required for the trainer (python ~6 GB + 8 capped JVMs ~5 GB)
+# Oct 11 21:55: memory-aware GPU pick for the TRAINER only (host-RAM OOM kills in full 64G job cgroups): same candidates / skip list as pick(),
+# needs >= HSD_MIN MiB free GPU AND >= HSD_RAM GiB free host RAM in that job's cgroup; best = most free GPU memory.
+pick_mem() { local best="" bm=0 skip=" $(cat $SF/.skip_jobs 2>/dev/null | tr '\n' ' ') "; for H in $(squeue -u pan00389 -h -o "%i %j %T" | awk -v re="${HOLD_NAME_RE:-^error_attr_hold_}" '$2 ~ re && $3=="RUNNING"{print $1}'); do case "$skip" in *" $H "*) continue;; esac
+  for N in $(scontrol show hostnames $(squeue -h -j $H -o %N) 2>/dev/null); do
+    local r=$(timeout 60 srun --jobid=$H --overlap -n1 -c1 --mem=0 -w $N bash -c "d=/sys/fs/cgroup/memory/slurm/uid_\$(id -u)/job_$H; echo \$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits | head -n1) \$(( (\$(cat \$d/memory.limit_in_bytes) - \$(awk '/^total_rss |^total_shmem /{s+=\$2} END{print s+0}' \$d/memory.stat)) / 1073741824 ))" 2>/dev/null)
+    set -- $r; local m=${1:-0} f=${2:-0}
+    [ "$m" -gt "$bm" ] 2>/dev/null && [ "$f" -ge "$HSD_RAM" ] 2>/dev/null && { bm=$m; best="$H $N"; }; done; done
+  [ "$bm" -ge ${1:-15000} ] 2>/dev/null && echo $best; }
+SM() { local H=""; until H=$(pick_mem $1); [ -n "$H" ]; do sleep 60; done; set -- $H; echo "srun --jobid=$1 --overlap -n1 -c8 --mem=0 -w $2"; }
+slog "hsdon: start on $(hostname) (train -> $T, evals $SF/hsdon_c1..3)"
+( n=0; until grep -q "^DONE hintsd_online" $T/train.log 2>/dev/null; do n=$((n + 1)); wait_free "hintsd_online_sciworld.py --out $T\$"
+    echo "### attempt $n $(date '+%F %T')" >> $T/train.log
+    $(SM $HSD_MIN) $P -u scripts/hintsd_online_sciworld.py --out $T >> $T/train.log 2>&1 || { echo "### attempt $n exited non-zero $(date '+%F %T')" >> $T/train.log; sleep 120; }
+  done; slog "hsdon: training DONE $(grep '^SUMMARY' $T/train.log | tail -n 1)" ) &
+evalc() { local c=$1 NM=hsdon_c$1; local D=$SF/$NM; local E=$D/eval; mkdir -p $E
+  until [ -f $T/ckpt$c/adapter/adapter_config.json ] && [ -f $T/ckpt$c/adapter/adapter_model.safetensors ]; do sleep 120; done
+  mkdir -p $D/model; [ -e $D/model/adapter ] || cp -r $T/ckpt$c/adapter $D/model/adapter   # frozen copy (the trainer never rewrites ckptN, but keep evals independent)
+  slog "$NM: checkpoint found ($(grep "^CKPT$c " $T/train.log | tail -1)); 848 eval starts"
+  if [ ! -s $E/eval_test.jsonl ] || [ ! -s $E/eval_dev.jsonl ]; then
+    pids=""; for i in $(seq 0 31); do shard_loop $E/eval_test_w$i.log scripts/sciworld_agent.py collect --adapter $D/model/adapter --split test --per_task 30 --budget 50 --temperature 0 --seed 0 --snap safe --shard $i 32 --out $E/eval_test_w$i.jsonl --tag ${NM}_test & pids="$pids $!"; sleep 5; done
+    for i in $(seq 0 7); do shard_loop $E/eval_dev_w$i.log scripts/sciworld_agent.py collect --adapter $D/model/adapter --split dev --per_task 7 --budget 50 --temperature 0 --seed 0 --snap safe --shard $i 8 --out $E/eval_dev_w$i.jsonl --tag ${NM}_dev & pids="$pids $!"; sleep 5; done
+    wait $pids; cat $E/eval_test_w*.jsonl > $E/eval_test.jsonl; cat $E/eval_dev_w*.jsonl > $E/eval_dev.jsonl
+  fi
+  slog "$NM: 848 eval DONE"
+  for rf in R0=$SF/r0/eval_test.jsonl,reports/sciworld/refix/eval_dev_safe.jsonl w1=$SF/w1/eval/eval_test.jsonl,$SF/w1/eval/eval_dev.jsonl w2k=$SF/w2k/eval/eval_test.jsonl,$SF/w2k/eval/eval_dev.jsonl wk3=$SF/wk3/eval/eval_test.jsonl,$SF/wk3/eval/eval_dev.jsonl; do
+    $P scripts/sciworld_stepfix_compare.py --a $rf --b $NM=$E/eval_test.jsonl,$E/eval_dev.jsonl | head -1 | tee -a $SF/queue.log; done
+  slog "$NM DONE"; }
+for c in 1 2 3; do evalc $c & sleep 5; done
+wait
+slog "hsdon: DONE (train + 3 evals)"

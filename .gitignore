@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.log
+*.out
+reports/
+data/
+*.safetensors
+*.pt
+*.bin
+.env

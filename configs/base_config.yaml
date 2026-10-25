@@ -1,0 +1,32 @@
+env:
+  type: "AlfredTWEnv"
+  regen_game_files: false
+  domain_randomization: false
+  task_types: [1, 2, 3, 4, 5, 6]
+  expert_type: "handcoded"
+  goal_desc_human_anns_prob: 0.0
+
+dataset:
+  data_path: "$ERROR_ATTR_ROOT/data/alfworld/json_2.1.1/train"
+  eval_id_data_path: "$ERROR_ATTR_ROOT/data/alfworld/json_2.1.1/valid_seen"
+  eval_ood_data_path: "$ERROR_ATTR_ROOT/data/alfworld/json_2.1.1/valid_unseen"
+  num_train_games: -1
+  num_eval_games: -1
+
+logic:
+  domain: "$ERROR_ATTR_ROOT/data/alfworld/logic/alfred.pddl"
+  grammar: "$ERROR_ATTR_ROOT/data/alfworld/logic/alfred.twl2"
+
+general:
+  random_seed: 42
+  use_cuda: false
+  training_method: "dqn"
+
+rl:
+  training:
+    batch_size: 1
+    max_episode: 1
+    smoothing_eps: 0.1
+    optimizer:
+      learning_rate: 0.001
+    max_nb_steps_per_episode: 50
